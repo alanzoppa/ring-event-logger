@@ -1,4 +1,5 @@
-import { RingApi, PushNotificationAction, Camera, Location, RingDevice } from 'ring-client-api';
+import { RingApi, PushNotificationAction } from 'ring-client-api';
+import type { RingCamera, Location, RingDevice } from 'ring-client-api';
 import { v4 as uuidv4 } from 'uuid';
 import type { RingEvent, RegisteredDevice, WebhookConfig } from './types';
 import type { Logger } from './logger';
@@ -11,8 +12,11 @@ import type { TokenManager } from './token-manager';
 export class RingClient {
   private api: RingApi | null = null;
   private locations: Location[] = [];
-  private cameras: Camera[] = [];
+  private cameras: RingCamera[] = [];
   private devices: Map<string, RingDevice> = new Map();
+  
+  // Map camera ID to location for quick lookup
+  private cameraLocations: Map<number, Location> = new Map();
 
   constructor(
     private config: {
@@ -42,11 +46,19 @@ export class RingClient {
       await this.tokenManager.save(newRefreshToken);
     });
 
-    // Get locations and cameras
+    // Get locations
     this.locations = await this.api.getLocations();
-    this.cameras = await this.api.getCameras();
+    this.logger.info(`Found ${this.locations.length} location(s)`);
 
-    this.logger.info(`Found ${this.locations.length} location(s) with ${this.cameras.length} camera(s)`);
+    // Get cameras from each location and build the mapping
+    for (const location of this.locations) {
+      const locationCameras = location.cameras || [];
+      for (const camera of locationCameras) {
+        this.cameraLocations.set(camera.id, location);
+        this.cameras.push(camera);
+      }
+      this.logger.info(`  ${location.name}: ${locationCameras.length} camera(s)`);
+    }
 
     // Log location connection status
     for (const location of this.locations) {
@@ -67,31 +79,40 @@ export class RingClient {
   }
 
   /**
+   * Get location for a camera
+   */
+  private getCameraLocation(camera: RingCamera): Location | undefined {
+    return this.cameraLocations.get(camera.id);
+  }
+
+  /**
    * Subscribe to all camera/doorbell events
    */
   private async subscribeToCameraEvents(): Promise<void> {
     for (const camera of this.cameras) {
+      const location = this.getCameraLocation(camera);
+      
       // Register device
-      this.registerDevice(camera);
+      this.registerDevice(camera, location);
 
       // All push notifications (motion, ding, etc.)
-      camera.onNewNotification.subscribe((notification) => {
-        this.handleCameraNotification(camera, notification);
+      camera.onNewNotification.subscribe((notification: any) => {
+        this.handleCameraNotification(camera, notification, location);
       });
 
       // Doorbell press specifically
-      camera.onDoorbellPressed.subscribe((ding) => {
-        this.handleDoorbellPress(camera, ding);
+      camera.onDoorbellPressed.subscribe((ding: any) => {
+        this.handleDoorbellPress(camera, ding, location);
       });
 
       // Motion state changes
-      camera.onMotionDetected.subscribe((motion) => {
-        this.handleMotionDetected(camera, motion);
+      camera.onMotionDetected.subscribe((motion: boolean) => {
+        this.handleMotionDetected(camera, motion, location);
       });
 
       // Camera data updates (battery, settings, etc.)
-      camera.onData.subscribe((data) => {
-        this.handleCameraDataUpdate(camera, data);
+      camera.onData.subscribe((data: any) => {
+        this.handleCameraDataUpdate(camera, data, location);
       });
 
       this.logger.debug(`Subscribed to events for ${camera.name}`, {
@@ -112,7 +133,7 @@ export class RingClient {
         this.devices.set(device.zid, device);
 
         // Device state changes
-        device.onData.subscribe((data) => {
+        device.onData.subscribe((data: any) => {
           this.handleDeviceUpdate(location, device, data);
         });
       }
@@ -124,7 +145,7 @@ export class RingClient {
   /**
    * Handle camera push notification
    */
-  private handleCameraNotification(camera: Camera, notification: any): void {
+  private handleCameraNotification(camera: RingCamera, notification: any, location?: Location): void {
     const action = notification.android_config?.category;
     const eventType = this.mapActionToEventType(action);
     const ding = notification.data?.event?.ding;
@@ -140,9 +161,9 @@ export class RingClient {
       sourceType: camera.isDoorbot ? 'doorbell' : 'camera',
       sourceId: camera.id.toString(),
       sourceName: camera.name,
-      deviceType: camera.deviceType,
-      locationId: camera.location.id,
-      locationName: camera.location.name,
+      deviceType: String(camera.deviceType),
+      locationId: location?.id || 'unknown',
+      locationName: location?.name || 'Unknown',
       eventType: personDetected ? 'person' : eventType,
       subtype: personDetected ? eventType : undefined,
       data: eventData,
@@ -179,7 +200,7 @@ export class RingClient {
   /**
    * Handle doorbell press
    */
-  private handleDoorbellPress(camera: Camera, ding: any): void {
+  private handleDoorbellPress(camera: RingCamera, ding: any, location?: Location): void {
     const event: RingEvent = {
       id: uuidv4(),
       timestamp: ding.created_at || new Date().toISOString(),
@@ -187,9 +208,9 @@ export class RingClient {
       sourceType: 'doorbell',
       sourceId: camera.id.toString(),
       sourceName: camera.name,
-      deviceType: camera.deviceType,
-      locationId: camera.location.id,
-      locationName: camera.location.name,
+      deviceType: String(camera.deviceType),
+      locationId: location?.id || 'unknown',
+      locationName: location?.name || 'Unknown',
       eventType: 'doorbell_pressed',
       data: ding,
       dingId: ding.id?.toString(),
@@ -205,7 +226,7 @@ export class RingClient {
   /**
    * Handle motion detected
    */
-  private handleMotionDetected(camera: Camera, motion: boolean): void {
+  private handleMotionDetected(camera: RingCamera, motion: boolean, location?: Location): void {
     // Only log when motion starts, not when it ends
     if (!motion) return;
 
@@ -216,9 +237,9 @@ export class RingClient {
       sourceType: camera.isDoorbot ? 'doorbell' : 'camera',
       sourceId: camera.id.toString(),
       sourceName: camera.name,
-      deviceType: camera.deviceType,
-      locationId: camera.location.id,
-      locationName: camera.location.name,
+      deviceType: String(camera.deviceType),
+      locationId: location?.id || 'unknown',
+      locationName: location?.name || 'Unknown',
       eventType: 'motion',
       data: { state: motion },
     };
@@ -230,13 +251,15 @@ export class RingClient {
   /**
    * Handle camera data updates (battery, settings, etc.)
    */
-  private handleCameraDataUpdate(camera: Camera, data: any): void {
+  private handleCameraDataUpdate(camera: RingCamera, data: any, location?: Location): void {
     // Update device registry with latest info
-    this.registerDevice(camera);
+    this.registerDevice(camera, location);
 
     // Log significant state changes
-    if (data.battery_life !== undefined && data.battery_life !== camera.data?.battery_life) {
-      this.logger.debug(`Battery update: ${camera.name}`, { battery: data.battery_life });
+    const batteryLife = (data as any).battery_life;
+    const currentBattery = (camera.data as any)?.battery_life;
+    if (batteryLife !== undefined && batteryLife !== currentBattery) {
+      this.logger.debug(`Battery update: ${camera.name}`, { battery: batteryLife });
     }
   }
 
@@ -275,7 +298,7 @@ export class RingClient {
   /**
    * Trigger configured webhooks for an event
    */
-  private async triggerWebhooks(event: RingEvent, camera?: Camera): Promise<void> {
+  private async triggerWebhooks(event: RingEvent, camera?: RingCamera): Promise<void> {
     const webhooks = this.config.webhooks || [];
 
     for (const webhook of webhooks) {
@@ -317,7 +340,7 @@ export class RingClient {
   /**
    * Build webhook payload based on format
    */
-  private buildWebhookPayload(event: RingEvent, camera: Camera | undefined, webhook: WebhookConfig): any {
+  private buildWebhookPayload(event: RingEvent, camera: RingCamera | undefined, webhook: WebhookConfig): any {
     // Custom payload template
     if (webhook.payloadTemplate) {
       return webhook.payloadTemplate(event, camera);
@@ -358,7 +381,7 @@ export class RingClient {
   /**
    * Build a prompt for agent invocation
    */
-  private buildAgentPrompt(event: RingEvent, camera: Camera | undefined): string {
+  private buildAgentPrompt(event: RingEvent, camera: RingCamera | undefined): string {
     const time = new Date(event.timestamp).toLocaleString('en-US', {
       hour: 'numeric',
       minute: '2-digit',
@@ -391,8 +414,6 @@ export class RingClient {
         return 'motion';
       case PushNotificationAction.Ding:
         return 'ding';
-      case PushNotificationAction.OnDemand:
-        return 'on_demand';
       default:
         return action.toLowerCase();
     }
@@ -401,17 +422,18 @@ export class RingClient {
   /**
    * Register device in the database
    */
-  private registerDevice(camera: Camera): void {
+  private registerDevice(camera: RingCamera, location?: Location): void {
+    const cameraData = camera.data as any;
     const device: RegisteredDevice = {
       id: camera.id.toString(),
       name: camera.name,
-      deviceType: camera.deviceType,
-      locationId: camera.location.id,
-      locationName: camera.location.name,
+      deviceType: String(camera.deviceType),
+      locationId: location?.id || 'unknown',
+      locationName: location?.name || 'Unknown',
       hasLight: camera.hasLight,
       hasSiren: camera.hasSiren,
       isDoorbot: camera.isDoorbot,
-      batteryLevel: camera.data?.battery_life,
+      batteryLevel: cameraData?.battery_life,
       lastSeen: new Date().toISOString(),
     };
 
@@ -421,7 +443,7 @@ export class RingClient {
   /**
    * Get all registered cameras
    */
-  getCameras(): Camera[] {
+  getCameras(): RingCamera[] {
     return this.cameras;
   }
 

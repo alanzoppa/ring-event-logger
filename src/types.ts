@@ -1,6 +1,6 @@
 // Core types for Ring Event Logger
 
-import { Camera, Location, RingDevice, RingApi, PushNotificationAction } from 'ring-client-api'
+import type { RingCamera, Location, RingDevice, RingApi, PushNotificationAction } from 'ring-client-api'
 
 // ==============
 // Webhook Configuration
@@ -22,7 +22,7 @@ export interface WebhookConfig {
   format?: 'openclaw' | 'discord' | 'custom';
   
   /** Custom payload builder */
-  payloadTemplate?: (event: RingEvent, camera: Camera | undefined) => any;
+  payloadTemplate?: (event: RingEvent, camera: RingCamera | undefined) => any;
 }
 
 // ==============

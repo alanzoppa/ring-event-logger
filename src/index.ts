@@ -42,7 +42,12 @@ async function main(): Promise<void> {
   try {
     await ringClient.connect();
   } catch (error) {
-    logger.error('Failed to connect to Ring', { error });
+    const err = error as Error;
+    logger.error('Failed to connect to Ring', { 
+      message: err.message,
+      stack: err.stack,
+      name: err.name
+    });
     process.exit(1);
   }
 
