@@ -1,0 +1,17 @@
+[
+  {
+    "name": "discord-alert",
+    "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+    "format": "discord",
+    "eventTypes": ["person", "doorbell_pressed"]
+  },
+  {
+    "name": "openclaw-agent",
+    "url": "http://localhost:3000/api/trigger",
+    "format": "openclaw",
+    "eventTypes": ["person"],
+    "headers": {
+      "Authorization": "Bearer YOUR_TOKEN"
+    }
+  }
+]
